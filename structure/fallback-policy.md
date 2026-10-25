@@ -129,3 +129,5 @@ privacy), `tests/responses/responses-combo-fallback-off.test.ts`, `tests/routing
 `tests/routing/subagent-model-fallback-off.test.ts`, `tests/codex-integration/main-account-hard-lock-fallback-off.test.ts`,
 `tests/server/fallback-routes.test.ts`, `tests/clients/client-home-unreachable.test.ts`, `tests/cli/cli-fallback.test.ts`
 and `gui/tests/fallback-panel.test.tsx`.
+
+The opt-in [all-cooled Combo recovery](runtime.md#scoped-provider-quota-for-combo-selection) can reopen saved combo cooldowns in `src/combos/resolve.ts`; it does not authorize a fallback hop or bypass the configured fallback policy.

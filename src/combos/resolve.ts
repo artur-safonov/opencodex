@@ -3,6 +3,7 @@ import { getCachedProviderRoutingQuota } from "../providers/quota-routing-cache"
 import type { ProviderQuota, ProviderQuotaWindow } from "../providers/quota-types";
 import { sleepWithAbort } from "../lib/upstream-retry";
 import {
+  clearComboTargetCooldowns,
   coolComboTarget,
   earliestComboCooldown,
   isComboTargetInCooldown,
@@ -26,6 +27,7 @@ export interface ComboPick {
 }
 
 interface SelectionState {
+  lastCooldownReprobeAt?: number;
   activeKey?: string;
   successes: number;
   currentWeights: Map<string, number>;
@@ -286,6 +288,27 @@ function resetWindowIndex(
   return selected;
 }
 
+/** Reserve one recovery pass before mutating cooldowns; preview and in-flight picks never call this. */
+function reopenAllCooledTargets(
+  config: OcxConfig, comboId: string, now: number,
+  eligible?: (target: NormalizedComboTarget) => boolean,
+): void {
+  const combo = getCombo(config, comboId);
+  if (!combo?.cooldownReprobe?.enabled) return;
+  const state = selectionState.get(comboId);
+  if (state?.lastCooldownReprobeAt !== undefined
+    && now - state.lastCooldownReprobeAt < combo.cooldownReprobe.intervalMs) return;
+  const usable = combo.targets.filter(target => targetProviderIsUsable(config, target, now)
+    && (eligible?.(target) ?? true));
+  if (usable.length === 0 || !usable.every(target => isComboTargetInCooldown(comboId, target, now))) return;
+  // No await between reservation and reset: concurrent requests cannot reserve another pass.
+  const next = state ?? { successes: 0, currentWeights: new Map<string, number>(), successfulUses: new Map<string, number>() };
+  next.lastCooldownReprobeAt = now;
+  selectionState.set(comboId, next);
+  clearComboTargetCooldowns(comboId);
+  console.warn(`[combo] ${comboId}: reopening all-cooled targets; minimum reprobe interval ${combo.cooldownReprobe.intervalMs}ms`);
+}
+
 export function pickComboTarget(
   config: OcxConfig,
   comboId: string,
@@ -302,6 +325,9 @@ export function pickComboTarget(
   if (!combo) throw new UnknownComboError(comboId);
   const excluded = new Set(options.exclude ?? []);
   const now = options.now ?? Date.now();
+  if (!options.preview && excluded.size === 0) {
+    reopenAllCooledTargets(config, comboId, now, options.eligible);
+  }
   const eligible = (target: NormalizedComboTarget): boolean =>
     targetProviderIsUsable(config, target, now)
     && !isComboTargetInCooldown(comboId, target, now)
@@ -505,6 +531,9 @@ export async function pickComboTargetWithWait(
   const now = options.now ?? Date.now();
   const excluded = new Set(options.exclude ?? []);
   const customEligible = options.eligible;
+  if (excluded.size === 0 && !options.abortSignal?.aborted) {
+    reopenAllCooledTargets(config, comboId, now, customEligible);
+  }
   const eligibleAt = (target: NormalizedComboTarget, at: number): boolean =>
     !isComboTargetInCooldown(comboId, target, at)
     && (customEligible?.(target) ?? true);
