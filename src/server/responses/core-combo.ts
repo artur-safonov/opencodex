@@ -582,6 +582,7 @@ export async function executeComboResponses(
   const pickWithWait = (pickOptions: {
     exclude?: Iterable<string>;
     eligible?: (target: NonNullable<typeof combo>["targets"][number]) => boolean;
+    allowCooldownReprobe?: boolean;
     now?: number;
   }) => pickComboTargetWithWait(config, comboId, {
     ...pickOptions,
@@ -1362,10 +1363,11 @@ export async function executeComboResponses(
     const failedTargetCooled = failureCooldownScope !== "none"
       && failedTargetCooldownRecorded
       && isComboTargetInCooldown(comboId, pick.target, failureNow);
-    // Same target selector as the exclusionary pick below, minus `exclude`: the only
-    // difference is deliberate and is the whole point of the single-target retry.
+    // Drop exclusions for the single-target retry, but wait for normal cooldown
+    // expiry: an in-flight request cannot reserve a fresh recovery pass.
     const retryAfterCooldown = () =>
       pickWithWait({
+        allowCooldownReprobe: false,
         eligible: targetEligible,
         now: failureNow,
       });

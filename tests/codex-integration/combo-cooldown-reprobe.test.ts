@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'bun:test';
 import { pickComboTarget, pickComboTargetWithWait, advanceComboAfterFailure, clearComboSelectionState } from '../../src/combos/resolve';
-import { coolComboTarget, isComboTargetInCooldown } from '../../src/combos/failover';
+import { clearComboTargetCooldowns, coolComboTarget, isComboTargetInCooldown } from '../../src/combos/failover';
 import { comboConfigIssues, normalizeComboConfig } from '../../src/combos/types';
 import { routeModel } from '../../src/router';
 import type { OcxConfig, OcxComboConfig } from '../../src/types';
@@ -60,6 +60,47 @@ describe('opt-in cooldown recovery', () => {
     expect(pickComboTarget(config, id, { now })!.target.model).toBe('test-b');
     expect(isComboTargetInCooldown(id, targets[0]!, now)).toBe(true);
   });
+  test('recovery preserves cooldowns for targets ineligible for this request', () => {
+    const { id, config } = setup();
+    const pick = pickComboTarget(config, id, { now, eligible: target => target.model === 'test-a' });
+    expect(pick!.target.model).toBe('test-a');
+    expect(isComboTargetInCooldown(id, targets[0]!, now)).toBe(false);
+    expect(isComboTargetInCooldown(id, targets[1]!, now)).toBe(true);
+  });
+  test('scoped cooldown clearing preserves other targets and combos', () => {
+    const a = setup();
+    const b = setup();
+    clearComboTargetCooldowns(a.id, []);
+    expect(isComboTargetInCooldown(a.id, targets[0]!, now)).toBe(true);
+    clearComboTargetCooldowns(a.id, ['openai/test-a']);
+    expect(isComboTargetInCooldown(a.id, targets[0]!, now)).toBe(false);
+    expect(isComboTargetInCooldown(a.id, targets[1]!, now)).toBe(true);
+    expect(isComboTargetInCooldown(b.id, targets[0]!, now)).toBe(true);
+    clearComboTargetCooldowns(a.id);
+    expect(isComboTargetInCooldown(a.id, targets[1]!, now)).toBe(false);
+    expect(isComboTargetInCooldown(b.id, targets[1]!, now)).toBe(true);
+  });
+  test('explicit opt-out preserves cooldowns without consuming a recovery reservation', async () => {
+    const { id, config } = setup();
+    expect(pickComboTarget(config, id, { now, allowCooldownReprobe: false })).toBeNull();
+    expect(await pickComboTargetWithWait(config, id, {
+      now, waitForCooldownMs: 0, allowCooldownReprobe: false,
+    })).toBeNull();
+    expect(isComboTargetInCooldown(id, targets[0]!, now)).toBe(true);
+    expect(await pickComboTargetWithWait(config, id, { now, waitForCooldownMs: 0 })).not.toBeNull();
+  });
+  test('in-flight retries wait for normal cooldown expiry even after the reprobe interval', async () => {
+    const { id, config } = setup({ enabled: true, intervalMs: 1000 });
+    expect(pickComboTarget(config, id, { now })).not.toBeNull();
+    for (const target of targets) coolComboTarget(id, target, { now, retryAfter: '2', status: 429 });
+    const sleeps: number[] = [];
+    const pick = await pickComboTargetWithWait(config, id, {
+      now: now + 1000, waitForCooldownMs: 1000, allowCooldownReprobe: false,
+      sleep: async delay => { sleeps.push(delay); },
+    });
+    expect(sleeps).toEqual([1000]);
+    expect(pick!.target.model).toBe('test-a');
+  });
   test('wait path reserves synchronously across concurrent callers', async () => {
     const { id, config } = setup();
     const first = await pickComboTargetWithWait(config, id, { now, waitForCooldownMs: 0 });
@@ -85,13 +126,15 @@ describe('opt-in cooldown recovery', () => {
     clearComboSelectionState(id);
     expect(pickComboTarget(config, id, { now })).not.toBeNull();
   });
-  test('router can recover an all-cooled combo, while preview is side-effect-free', () => {
+  test('route-level selection cannot reopen targets without request eligibility', () => {
     const { id, config } = setup();
     // Router uses the real clock; keep these cooldowns ahead of it.
     cool(id, Date.now());
-    const route = routeModel(config, `combo/${id}`);
-    expect(route.providerName).toBe('openai');
-    expect(route.modelId).toBe('test-a');
+    expect(() => routeModel(config, `combo/${id}`)).toThrow();
+    expect(isComboTargetInCooldown(id, targets[0]!, Date.now())).toBe(true);
+    expect(isComboTargetInCooldown(id, targets[1]!, Date.now())).toBe(true);
+    expect(pickComboTarget(config, id, { now: Date.now(), eligible: target => target.model === 'test-a' })).not.toBeNull();
+    expect(isComboTargetInCooldown(id, targets[1]!, Date.now())).toBe(true);
   });
 });
 
