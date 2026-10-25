@@ -530,16 +530,13 @@ export async function executeComboResponses(
   let encryptedTaskRecoveryAttempted = false;
   let recoveryFailureReason: AgentTaskRecoveryFailureReason | undefined;
   let storedPool401ReplayDispatched = false;
+  const recovery = agentTaskRecoveryConfig(config);
+  const encryptedTaskRecoveryAdmitted = (options.inboundWire ?? "responses") === "responses"
+    && isThreadSpawnRequest(req.headers) && !!recovery && !options.comboAttempt;
   const recoverUnreadableEncryptedTask = async (): Promise<boolean> => {
     if (encryptedTaskRecoveryAttempted) return false;
     encryptedTaskRecoveryAttempted = true;
-    const recovery = agentTaskRecoveryConfig(config);
-    if (
-      (options.inboundWire ?? "responses") !== "responses"
-      || !isThreadSpawnRequest(req.headers)
-      || !recovery
-      || options.comboAttempt
-    ) {
+    if (!encryptedTaskRecoveryAdmitted || !recovery) {
       discardEncryptedAgentTaskRecovery(
         req,
         (body as { input?: unknown } | undefined)?.input,
@@ -616,7 +613,11 @@ export async function executeComboResponses(
     : jevSessionPinScope({ combo, comboId, admission: options.admission, lane: sessionLaneIdFromRequest(req.headers) });
 
   if (unreadableEncryptedAgentTask && !pick) {
-    pick = await pickWithWait({ eligible: recoveryEligible, now: initialNow });
+    pick = await pickWithWait({
+      eligible: recoveryEligible,
+      allowCooldownReprobe: encryptedTaskRecoveryAdmitted,
+      now: initialNow,
+    });
     if (!pick) {
       discardEncryptedAgentTaskRecovery(
         req,
