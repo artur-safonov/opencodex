@@ -4,8 +4,9 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createCertificateAuthority } from "../../src/claude/intercept/local-ca";
 import { X509Certificate } from "node:crypto";
 import { createDesktopCompatibilityRuntime, type DesktopRuntimeIo } from "../../src/codex/desktop-compatibility/runtime";
-import { createInstalledBuildProbe, DESKTOP_COMPATIBILITY_ASSESSED_VERSION, DESKTOP_COMPATIBILITY_ASSESSED_FAMILY } from "../../src/codex/desktop-compatibility/installed-build";
-import type { DesktopAppInstall } from "../../src/codex/desktop-app/types";
+import { createInstalledBuildProbe, DESKTOP_COMPATIBILITY_ASSESSED_VERSION } from "../../src/codex/desktop-compatibility/installed-build";
+import type { DesktopPackageObservation as DesktopAppInstall } from "../../src/codex/desktop-compatibility/installed-build";
+import { desktopPackageObservation } from "../helpers/desktop-package-observation";
 import { UsageRelayController, type UsageIdentity } from "../../src/codex/desktop-compatibility/usage-controller";
 import { desktopCompatibilityRuntimeActive, readDesktopCompatibilityLaunch } from "../../src/codex/desktop-compatibility/runtime-ownership";
 import { captureWindowsCompatibilityContext, assertWindowsCompatibilityContext } from "../../src/codex/desktop-compatibility/windows-package-command";
@@ -206,9 +207,49 @@ function fixture(trusted = true, connectionStore?: DesktopConnectionStore, build
 }
 
 describe("optional native compatibility runtime", () => {
-  const assessedInstall = (): DesktopAppInstall => ({ id: DESKTOP_COMPATIBILITY_ASSESSED_FAMILY,
-    root: `C:\\Program Files\\WindowsApps\\OpenAI.Codex_${DESKTOP_COMPATIBILITY_ASSESSED_VERSION}_x64__2p2nqsd0c76g0`,
-    relaunch: `${DESKTOP_COMPATIBILITY_ASSESSED_FAMILY}!App` });
+  const assessedInstall = desktopPackageObservation;
+
+  for (const failure of ["same-version-replacement", "unverifiable", "ABA"] as const) {
+    test(`${failure} revokes package-bound trial consent before another corrected response`, async () => {
+      let current: DesktopAppInstall | null = assessedInstall();
+      let probe!: ReturnType<typeof createInstalledBuildProbe>;
+      const io = fixture(true, undefined, undefined, () => (probe = createInstalledBuildProbe(async () => current)));
+      await io.runtime.start();
+      const pac = await fetch(io.runtime.getPacUrl()!).then(res => res.text());
+      const port = /PROXY 127\.0\.0\.1:(\d+)/.exec(pac)![1];
+      const read = () => fetch("https://chatgpt.com/backend-api/wham/usage", {
+        proxy: `http://127.0.0.1:${port}`, tls: { ca: io.authority.certPem },
+      }).then(res => res.json());
+      await read(); expect((await io.runtime.apply(true)).accepted).toBe(true);
+      expect((await read()).rate_limit.allowed).toBe(true);
+      const generation = io.runtime.status().usage!.generation;
+      current = failure === "unverifiable" ? null
+        : { ...assessedInstall(), proof: { ...assessedInstall().proof!, executableIdentity: "1024:100:201" } };
+      if (failure === "ABA") {
+        expect(await probe.check()).toBe(true);
+        current = assessedInstall(); expect(await probe.check()).toBe(true);
+      }
+      expect(await read()).toEqual(usage);
+      expect(io.runtime.status().usage).toMatchObject({ mode: "observe", outputs: 0 });
+      expect(io.runtime.status().usage!.generation).toBeGreaterThan(generation);
+      if (failure === "unverifiable") {
+        current = assessedInstall();
+        // Recovery is another identity transition, not permission to revive consent.
+        await expect(io.runtime.apply(true)).rejects.toThrow("build_unverified");
+      }
+      expect((await io.runtime.apply(true)).accepted).toBe(false);
+      expect(await read()).toEqual(usage);
+      expect((await io.runtime.apply(false)).accepted).toBe(false);
+      expect((await io.runtime.apply(true)).accepted).toBe(true);
+      expect((await read()).rate_limit.allowed).toBe(true);
+      expect(JSON.stringify(io.runtime.status())).not.toContain("ChatGPT.exe");
+      expect(JSON.stringify(io.runtime.status())).not.toContain("manifestDigest");
+      await io.runtime.stop(); await io.runtime.start();
+      expect(io.runtime.status().usage?.mode).toBe("observe");
+      expect((await io.runtime.apply(true)).accepted).toBe(false);
+      await io.runtime.stop();
+    }, 15_000);
+  }
 
   test("stop/start retains a completed assessment through routing failure and replacement probe pending", async () => {
     let created = 0, queries = 0, hold = false, entered!: () => void, release!: (install: DesktopAppInstall | null) => void;

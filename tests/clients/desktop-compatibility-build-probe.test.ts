@@ -1,9 +1,59 @@
 import { expect, test } from "bun:test";
-import { createInstalledBuildProbe, DESKTOP_COMPATIBILITY_ASSESSED_VERSION, DESKTOP_COMPATIBILITY_ASSESSED_FAMILY } from "../../src/codex/desktop-compatibility/installed-build";
-import type { DesktopAppInstall } from "../../src/codex/desktop-app/types";
+import { createInstalledBuildProbe, DESKTOP_COMPATIBILITY_ASSESSED_VERSION, DESKTOP_PACKAGE_PROOF_SCRIPT } from "../../src/codex/desktop-compatibility/installed-build";
+import type { DesktopPackageObservation as DesktopAppInstall } from "../../src/codex/desktop-compatibility/installed-build";
+import { desktopPackageObservation } from "../helpers/desktop-package-observation";
 
-const installed = (version = DESKTOP_COMPATIBILITY_ASSESSED_VERSION): DesktopAppInstall => ({
-  id: DESKTOP_COMPATIBILITY_ASSESSED_FAMILY, root: `C:\\Program Files\\WindowsApps\\OpenAI.Codex_${version}_x64__2p2nqsd0c76g0`, relaunch: `${DESKTOP_COMPATIBILITY_ASSESSED_FAMILY}!App`,
+const installed = desktopPackageObservation;
+
+test("manifest and canonical executable facts are required without admitting another version", async () => {
+  const good = installed();
+  for (const proof of [undefined,
+    { ...good.proof!, manifestName: "Foreign.Codex" }, { ...good.proof!, manifestPublisher: "CN=Foreign" },
+    { ...good.proof!, appId: "Other" }, { ...good.proof!, executable: "other\\ChatGPT.exe" },
+    { ...good.proof!, canonicalExecutable: good.root + "-foreign\\app\\ChatGPT.exe" },
+    { ...good.proof!, packageFullName: good.proof!.packageFullName + "_extra" },
+    { ...good.proof!, manifestDigest: "unverified" }, { ...good.proof!, executableIdentity: "" }]) {
+    const probe = createInstalledBuildProbe(async () => ({ ...good, proof }));
+    expect(await probe.check()).toBe(false); expect(probe.binding().identity).toBeNull(); await probe.close();
+  }
+  const newer = createInstalledBuildProbe(async () => installed("26.1007.9446.0"));
+  expect(await newer.check()).toBe(false); await newer.close();
+  expect(DESKTOP_PACKAGE_PROOF_SCRIPT).toContain("Get-AppxPackageManifest");
+  expect(DESKTOP_PACKAGE_PROOF_SCRIPT).toContain("ChatGPT.exe");
+  expect(DESKTOP_PACKAGE_PROOF_SCRIPT).not.toContain("Activate");
+});
+
+test("same-version package proof changes and failure advance a private ABA fence", async () => {
+  let value: DesktopAppInstall | null = installed();
+  const probe = createInstalledBuildProbe(async () => value);
+  expect(await probe.check()).toBe(true); const first = probe.binding();
+  expect(await probe.check()).toBe(true); expect(probe.binding()).toEqual(first);
+  value = { ...installed(), proof: { ...installed().proof!, manifestDigest: "b".repeat(64) } };
+  expect(await probe.check()).toBe(true); expect(probe.binding().revision).toBeGreaterThan(first.revision);
+  value = installed(); expect(await probe.check()).toBe(true);
+  expect(probe.binding().identity).toBe(first.identity); expect(probe.binding().revision).toBeGreaterThan(first.revision);
+  value = null; expect(await probe.check()).toBe(false); expect(probe.binding().identity).toBeNull();
+  const failedRevision = probe.binding().revision;
+  value = installed(); expect(await probe.check()).toBe(true); expect(probe.binding().revision).toBeGreaterThan(failedRevision);
+  expect(JSON.stringify(probe.lastResult())).not.toContain(first.identity!);
+  expect(JSON.stringify(probe.lastResult())).not.toContain("ChatGPT.exe");
+  await probe.close(); expect(probe.binding().identity).toBeNull();
+});
+
+test("identical observed metadata cannot claim to detect a same-version reinstall", async () => {
+  const probe = createInstalledBuildProbe(async () => structuredClone(installed()));
+  expect(await probe.check()).toBe(true); const original = probe.binding();
+  expect(await probe.check()).toBe(true); expect(probe.binding()).toEqual(original);
+  await probe.close();
+});
+
+test("a successful query completed after close cannot restore private proof", async () => {
+  let release!: (value: DesktopAppInstall) => void;
+  const probe = createInstalledBuildProbe(() => new Promise(resolve => { release = resolve; }));
+  const checking = probe.check(); await Promise.resolve();
+  const closing = probe.close(); const closedBinding = probe.binding();
+  release(installed()); expect(await checking).toBe(false); await closing;
+  expect(probe.binding()).toEqual(closedBinding); expect(probe.lastResult()).toBeNull();
 });
 
 test("matching version text cannot qualify a foreign package family, publisher or app entry", async () => {
