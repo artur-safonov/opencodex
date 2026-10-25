@@ -10,5 +10,5 @@ export function desktopPackageObservation(version = DESKTOP_COMPATIBILITY_ASSESS
     proof: { packageFullName, publisherId: "2p2nqsd0c76g0", publisher: "CN=Fixture Registered Publisher",
       manifestName: "OpenAI.Codex", manifestPublisher: "CN=Fixture Registered Publisher", manifestVersion: version,
       appId: "App", executable: "app\\ChatGPT.exe", canonicalExecutable: win32.join(root, "app", "ChatGPT.exe"),
-      manifestDigest: "a".repeat(64), executableIdentity: "1024:100:200" } };
+      manifestDigest: "a".repeat(64), executableIdentity: "1024:100:200", ancestryIdentity: "c".repeat(64) } };
 }

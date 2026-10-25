@@ -185,7 +185,7 @@ It does not claim knowledge of project-local overrides or a conversation's selec
 Each record that would be corrected checks routing and the assessed installed build asynchronously,
 then rechecks account identity and trial generation before emitting it. `installed-build.ts` uses a
 compatibility-only current-user package query that reads the registered manifest's actual App and
-canonical `app/ChatGPT.exe` entry, binds its publisher/name/version to the exact official family,
+fixed ChatGPT.exe entry in the installed package's app directory, binds its publisher/name/version to the exact official family,
 and refuses missing/reparse executable facts. It coalesces concurrent probes without caching a positive
 result across requests, and aborts/reaps its bounded child before shutdown completes. Observe and
 unchanged responses do not query Windows. Background refresh runs once a minute in Observe,
@@ -198,7 +198,11 @@ another correction; a supported-version A-to-B-to-A transition cannot revive old
 success requires a new original exhaustion and explicit account-wide consent with the unchanged
 maximum three-minute trial. Stop/start replaces the observation context, and old probe completions
 cannot affect its replacement. Identical observed registration/file metadata cannot detect every
-same-version reinstall; this is not continuous file/process or signature attestation. The launcher,
+same-version reinstall; this is not continuous file/process or signature attestation.
+Every volume-root-to-file ancestor is checked for reparse points before manifest/file consumption
+and rechecked before proof publication. FullName is lexical and is not a held-handle canonical-path
+proof; the bounded before/after metadata walk does not exclude a transient replace-and-restore
+between observations. Such unobserved replacement remains outside this observation contract. The launcher,
 exact version allowlist, GET/SSE surface and default-off behavior remain unchanged.
 Each completed check also publishes a `buildAssessment` record on runtime status holding only
 `assessedVersion`, `observedVersion`, `verified` and `completedAt`. A status read never starts

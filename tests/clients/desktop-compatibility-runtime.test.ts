@@ -209,6 +209,42 @@ function fixture(trusted = true, connectionStore?: DesktopConnectionStore, build
 describe("optional native compatibility runtime", () => {
   const assessedInstall = desktopPackageObservation;
 
+  for (const completion of ["success", "rejection"] as const) {
+    test(`late ${completion} from a replaced runtime cannot invalidate its successor`, async () => {
+      let hold = false, entered!: () => void, resolveOld!: (value: boolean) => void, rejectOld!: (error: Error) => void;
+      const enteredPromise = new Promise<void>(resolve => { entered = resolve; });
+      // The override isolates the runtime epoch fence: production probe.close() separately drains its child.
+      const io = fixture(true, undefined, () => {
+        if (!hold) return true;
+        entered(); return new Promise<boolean>((resolve, reject) => { resolveOld = resolve; rejectOld = reject; });
+      });
+      const read = async () => {
+        const pac = await fetch(io.runtime.getPacUrl()!).then(response => response.text());
+        const port = /PROXY 127\.0\.0\.1:(\d+)/.exec(pac)![1];
+        return fetch("https://chatgpt.com/backend-api/wham/usage", {
+          proxy: `http://127.0.0.1:${port}`, tls: { ca: io.authority.certPem },
+        }).then(response => response.json());
+      };
+      await io.runtime.start(); await read(); hold = true;
+      const oldApply = io.runtime.apply(true).catch(error => error);
+      await enteredPromise;
+      try {
+        hold = false; await io.runtime.stop(); await io.runtime.start();
+        expect((await io.runtime.apply(true)).accepted).toBe(false);
+        expect(await read()).toEqual(usage);
+        expect((await io.runtime.apply(true)).accepted).toBe(true);
+        const generation = io.runtime.status().usage!.generation;
+        if (completion === "success") resolveOld(true); else rejectOld(new Error("old fixture proof rejected"));
+        expect(await oldApply).toBeInstanceOf(Error);
+        expect(io.runtime.status().contextFailure).toBeNull();
+        expect(io.runtime.status().usage).toMatchObject({ mode: "apply", generation });
+        expect((await read()).rate_limit.allowed).toBe(true);
+      } finally {
+        resolveOld(true); await oldApply; await io.runtime.stop();
+      }
+    }, 15_000);
+  }
+
   for (const failure of ["same-version-replacement", "unverifiable", "ABA"] as const) {
     test(`${failure} revokes package-bound trial consent before another corrected response`, async () => {
       let current: DesktopAppInstall | null = assessedInstall();

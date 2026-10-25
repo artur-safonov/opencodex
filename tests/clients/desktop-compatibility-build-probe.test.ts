@@ -1,9 +1,60 @@
 import { expect, test } from "bun:test";
-import { createInstalledBuildProbe, DESKTOP_COMPATIBILITY_ASSESSED_VERSION, DESKTOP_PACKAGE_PROOF_SCRIPT } from "../../src/codex/desktop-compatibility/installed-build";
+import { createInstalledBuildProbe, DESKTOP_COMPATIBILITY_ASSESSED_VERSION, DESKTOP_PACKAGE_PROOF_SCRIPT, DESKTOP_PACKAGE_PATH_GUARD_SCRIPT } from "../../src/codex/desktop-compatibility/installed-build";
+import { lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { join, parse } from "node:path";
+import { spawnTestChild } from "../helpers/spawn-test-child";
+import { resolveTrustedWindowsPowerShellExe } from "../../src/lib/windows-elevation";
 import type { DesktopPackageObservation as DesktopAppInstall } from "../../src/codex/desktop-compatibility/installed-build";
 import { desktopPackageObservation } from "../helpers/desktop-package-observation";
 
 const installed = desktopPackageObservation;
+
+test.skipIf(process.platform !== "win32")("owned ancestor junctions and persistent retargets fail before proof publication", async () => {
+  // Ordinary volume-root fixture: never use a registered package or the installed application.
+  const root = mkdtempSync(join(parse(process.cwd()).root, "ocx-package-ancestry-"));
+  const first = join(root, "first"), second = join(root, "second"), alias = join(root, "alias");
+  let terminal = true;
+  const quote = (value: string) => "'" + value.replaceAll("'", "''") + "'";
+  try {
+    for (const directory of [first, second]) {
+      mkdirSync(join(directory, "package", "app"), { recursive: true });
+      writeFileSync(join(directory, "package", "app", "ChatGPT.exe"), "fixture, not executable");
+      writeFileSync(join(directory, "package", "AppxManifest.xml"), "fixture, not Appx");
+    }
+    symlinkSync(first, alias, "junction");
+    const script = ["$ErrorActionPreference='Stop'", DESKTOP_PACKAGE_PATH_GUARD_SCRIPT,
+      `$alias=${quote(alias)}; $first=${quote(first)}; $second=${quote(second)}`,
+      "$leaf=Join-Path $alias 'package\\app\\ChatGPT.exe'",
+      // Leaf attributes alone cannot reveal the ancestor junction.
+      "if((Get-Item -LiteralPath $leaf).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Fixture leaf is not ordinary'}",
+      "function Refuses-BeforeRead([string]$File){$refused=$false; try{$null=Assert-DesktopPackagePath $File}catch{$refused=$true}; if(-not $refused){throw 'Guard admitted redirected ancestry'}; return $refused}",
+      "$initial=Refuses-BeforeRead $leaf",
+      "[IO.Directory]::Delete($alias); $null=New-Item -ItemType Junction -Path $alias -Target $second",
+      "$retarget=Refuses-BeforeRead $leaf",
+      "$ordinary=Join-Path $first 'package\\app\\ChatGPT.exe'; $before=Assert-DesktopPackagePath $ordinary",
+      "$null=Move-Item -LiteralPath $first -Destination ($first+'-saved'); $null=New-Item -ItemType Junction -Path $first -Target $second",
+      // The same revalidation used before publishing production proof must reject this change.
+      "$publication=Refuses-BeforeRead $ordinary",
+      "[pscustomobject]@{initial=$initial;retarget=$retarget;publication=$publication;ordinary=($before.Length -gt 0)}|ConvertTo-Json -Compress",
+    ].join("; ");
+    terminal = false;
+    const result = await spawnTestChild([resolveTrustedWindowsPowerShellExe(), "-NoProfile", "-NonInteractive", "-Command", script],
+      { cwd: root, deadlineMs: 10_000 });
+    terminal = result.reaped && result.pipesClosed;
+    expect(result).toMatchObject({ exitCode: 0, timedOut: false, reaped: true, pipesClosed: true });
+    expect(JSON.parse(result.stdout)).toEqual({ initial: true, retarget: true, publication: true, ordinary: true });
+  } finally {
+    // An unreaped child retains its fixture; never recursively follow the owned junctions.
+    if (terminal) {
+      for (const path of [alias, first]) {
+        try { if (lstatSync(path).isSymbolicLink()) unlinkSync(path); } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      }
+      rmSync(root, { recursive: true });
+    }
+  }
+}, 20_000);
 
 test("manifest and canonical executable facts are required without admitting another version", async () => {
   const good = installed();
@@ -12,7 +63,8 @@ test("manifest and canonical executable facts are required without admitting ano
     { ...good.proof!, appId: "Other" }, { ...good.proof!, executable: "other\\ChatGPT.exe" },
     { ...good.proof!, canonicalExecutable: good.root + "-foreign\\app\\ChatGPT.exe" },
     { ...good.proof!, packageFullName: good.proof!.packageFullName + "_extra" },
-    { ...good.proof!, manifestDigest: "unverified" }, { ...good.proof!, executableIdentity: "" }]) {
+    { ...good.proof!, manifestDigest: "unverified" }, { ...good.proof!, ancestryIdentity: "" },
+    { ...good.proof!, executableIdentity: "" }]) {
     const probe = createInstalledBuildProbe(async () => ({ ...good, proof }));
     expect(await probe.check()).toBe(false); expect(probe.binding().identity).toBeNull(); await probe.close();
   }

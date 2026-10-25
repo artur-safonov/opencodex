@@ -12,14 +12,32 @@ export const DESKTOP_COMPATIBILITY_ASSESSED_FAMILY = "OpenAI.Codex_2p2nqsd0c76g0
 export interface DesktopPackageObservation extends DesktopAppInstall {
   proof?: { packageFullName: string; publisherId: string; publisher: string; manifestName: string;
     manifestPublisher: string; manifestVersion: string; appId: string; executable: string;
-    canonicalExecutable: string; manifestDigest: string; executableIdentity: string };
+    canonicalExecutable: string; manifestDigest: string; executableIdentity: string; ancestryIdentity: string };
 }
+
+/** Shared only with owned-path fixtures. Metadata walk, not handle-bound final-path attestation. */
+export const DESKTOP_PACKAGE_PATH_GUARD_SCRIPT = [
+  "function Assert-DesktopPackagePath([string]$Path){",
+  String.raw`if($Path.Length -gt 8192 -or $Path -notmatch '^[A-Za-z]:\\' -or [IO.Path]::GetFullPath($Path) -ine $Path){throw 'Noncanonical package path'}`,
+  "$volume=[IO.Path]::GetPathRoot($Path); $current=$volume; $parts=@($Path.Substring($volume.Length).Split('\\')|Where-Object {$_ -ne ''})",
+  "if($parts.Count -gt 128){throw 'Package ancestry too deep'}; $seen=[Collections.Generic.List[string]]::new()",
+  "for($i=-1;$i -lt $parts.Count;$i++){",
+  "if($i -ge 0){$current=Join-Path $current $parts[$i]}; $item=Get-Item -LiteralPath $current -Force",
+  "if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -or ($i -lt $parts.Count-1 -and -not $item.PSIsContainer)){throw 'Reparse package ancestry'}",
+  "$seen.Add($item.FullName.ToLowerInvariant()+':'+$item.CreationTimeUtc.Ticks)",
+  "}; return ($seen -join '|')",
+  "}",
+].join("; ");
 
 // Compatibility-only read: do not alter general discovery or execute/activate the application.
 export const DESKTOP_PACKAGE_PROOF_SCRIPT = [
   "$ErrorActionPreference='Stop'; Import-Module Appx -ErrorAction Stop",
+  DESKTOP_PACKAGE_PATH_GUARD_SCRIPT,
   "$packages=@(Get-AppxPackage -Name OpenAI.Codex)",
   "if($packages.Count -ne 1){throw 'Package not unique'}; $p=$packages[0]",
+  // Walk from volume root down, rejecting junctions before reading the manifest/executable.
+  "$exePath=Join-Path $p.InstallLocation 'app\\ChatGPT.exe'; $manifestPath=Join-Path $p.InstallLocation 'AppxManifest.xml'",
+  "$exeChain=Assert-DesktopPackagePath $exePath; $manifestChain=Assert-DesktopPackagePath $manifestPath",
   "$root=Get-Item -LiteralPath $p.InstallLocation; $app=Get-Item -LiteralPath (Join-Path $root.FullName 'app')",
   "$exe=Get-Item -LiteralPath (Join-Path $app.FullName 'ChatGPT.exe')",
   "foreach($item in @($root,$app,$exe)){if($item.Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'Reparse identity'}}",
@@ -29,9 +47,13 @@ export const DESKTOP_PACKAGE_PROOF_SCRIPT = [
   "if($entry.Count -ne 1){throw 'App not unique'}; $entry=$entry[0]",
   "$xml=[Text.Encoding]::UTF8.GetBytes($manifest.OuterXml); if($xml.Length -gt 1048576){throw 'Manifest too large'}",
   "$sha=[Security.Cryptography.SHA256]::Create(); try{$digest=([BitConverter]::ToString($sha.ComputeHash($xml))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}",
+  // Revalidate the whole chain before further file reads and immediately before publication.
+  "if((Assert-DesktopPackagePath $exePath) -cne $exeChain -or (Assert-DesktopPackagePath $manifestPath) -cne $manifestChain){throw 'Package ancestry changed'}",
   "$again=@(Get-AppxPackage -Name OpenAI.Codex); $exeAgain=Get-Item -LiteralPath $exe.FullName",
   "if($again.Count -ne 1 -or $again[0].PackageFullName -cne $p.PackageFullName -or $again[0].Publisher -cne $p.Publisher -or $again[0].InstallLocation -ine $p.InstallLocation -or ($exeAgain.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $exeAgain.Length -ne $exe.Length -or $exeAgain.CreationTimeUtc.Ticks -ne $exe.CreationTimeUtc.Ticks -or $exeAgain.LastWriteTimeUtc.Ticks -ne $exe.LastWriteTimeUtc.Ticks){throw 'Package changed during proof'}",
-  "[pscustomobject]@{id=$p.PackageFamilyName;root=$root.FullName;relaunch=$p.PackageFamilyName+'!App';proof=@{packageFullName=$p.PackageFullName;publisherId=$p.PublisherId;publisher=$p.Publisher;manifestName=[string]$manifest.Package.Identity.Name;manifestPublisher=[string]$manifest.Package.Identity.Publisher;manifestVersion=[string]$manifest.Package.Identity.Version;appId=[string]$entry.Id;executable=[string]$entry.Executable;canonicalExecutable=$exe.FullName;manifestDigest=$digest;executableIdentity=([string]$exe.Length+':'+$exe.CreationTimeUtc.Ticks+':'+$exe.LastWriteTimeUtc.Ticks)}}|ConvertTo-Json -Depth 3 -Compress",
+  "if((Assert-DesktopPackagePath $exePath) -cne $exeChain -or (Assert-DesktopPackagePath $manifestPath) -cne $manifestChain){throw 'Package ancestry changed'}",
+  "$sha=[Security.Cryptography.SHA256]::Create(); try{$ancestry=([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($exeChain+'|'+$manifestChain)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}",
+  "[pscustomobject]@{id=$p.PackageFamilyName;root=$root.FullName;relaunch=$p.PackageFamilyName+'!App';proof=@{packageFullName=$p.PackageFullName;publisherId=$p.PublisherId;publisher=$p.Publisher;manifestName=[string]$manifest.Package.Identity.Name;manifestPublisher=[string]$manifest.Package.Identity.Publisher;manifestVersion=[string]$manifest.Package.Identity.Version;appId=[string]$entry.Id;executable=[string]$entry.Executable;canonicalExecutable=$exe.FullName;manifestDigest=$digest;executableIdentity=([string]$exe.Length+':'+$exe.CreationTimeUtc.Ticks+':'+$exe.LastWriteTimeUtc.Ticks);ancestryIdentity=$ancestry}}|ConvertTo-Json -Depth 3 -Compress",
 ].join("; ");
 
 /** Last completed probe outcome. Only public package facts: never paths, keys or account data. */
@@ -57,11 +79,12 @@ function assessInstalledPackage(install: DesktopPackageObservation): { observedV
     && proof.manifestVersion === observedVersion && proof.appId === "App"
     && typeof proof.executable === "string" && proof.executable.replaceAll("/", "\\").toLowerCase() === "app\\chatgpt.exe"
     && proof.canonicalExecutable === win32.join(install.root, "app", "ChatGPT.exe")
-    && /^[a-f0-9]{64}$/.test(proof.manifestDigest) && /^\d{1,16}:\d{1,20}:\d{1,20}$/.test(proof.executableIdentity);
+    && /^[a-f0-9]{64}$/.test(proof.manifestDigest) && /^[a-f0-9]{64}$/.test(proof.ancestryIdentity)
+    && /^\d{1,16}:\d{1,20}:\d{1,20}$/.test(proof.executableIdentity);
   const identity = verified && proof ? createHash("sha256").update(JSON.stringify([install.id, install.root, install.relaunch,
     proof.packageFullName, proof.publisherId, proof.publisher, proof.manifestName, proof.manifestPublisher,
     proof.manifestVersion, proof.appId, proof.executable, proof.canonicalExecutable, proof.manifestDigest,
-    proof.executableIdentity])).digest("hex") : null;
+    proof.executableIdentity, proof.ancestryIdentity])).digest("hex") : null;
   return { observedVersion, verified, identity };
 }
 
