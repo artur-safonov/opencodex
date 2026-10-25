@@ -67,6 +67,35 @@ describe('opt-in cooldown recovery', () => {
     expect(isComboTargetInCooldown(id, targets[0]!, now)).toBe(false);
     expect(isComboTargetInCooldown(id, targets[1]!, now)).toBe(true);
   });
+  for (const wait of [false, true]) {
+    test(`a cooled throwing predicate cannot block an available sibling (wait=${wait})`, async () => {
+      const { id, config } = setup();
+      clearComboTargetCooldowns(id, ['openai/test-b']);
+      let cooledChecks = 0;
+      const eligible = (target: typeof targets[number]) => {
+        if (target.model === 'test-a') { cooledChecks++; throw new Error('unavailable metadata'); }
+        return true;
+      };
+      const pick = wait
+        ? await pickComboTargetWithWait(config, id, { now, eligible, waitForCooldownMs: 0 })
+        : pickComboTarget(config, id, { now, eligible });
+      expect(pick!.target.model).toBe('test-b');
+      expect(cooledChecks).toBe(0);
+      expect(isComboTargetInCooldown(id, targets[0]!, now)).toBe(true);
+    });
+    test(`reprobe treats a throwing predicate as ineligible (wait=${wait})`, async () => {
+      const { id, config } = setup();
+      const eligible = (target: typeof targets[number]) => {
+        if (target.model === 'test-a') throw new Error('unavailable metadata');
+        return true;
+      };
+      const pick = wait
+        ? await pickComboTargetWithWait(config, id, { now, eligible, waitForCooldownMs: 0 })
+        : pickComboTarget(config, id, { now, eligible });
+      expect(pick!.target.model).toBe('test-b');
+      expect(isComboTargetInCooldown(id, targets[0]!, now)).toBe(true);
+    });
+  }
   test('scoped cooldown clearing preserves other targets and combos', () => {
     const a = setup();
     const b = setup();

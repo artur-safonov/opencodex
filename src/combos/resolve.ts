@@ -298,8 +298,15 @@ function reopenAllCooledTargets(
   const state = selectionState.get(comboId);
   if (state?.lastCooldownReprobeAt !== undefined
     && now - state.lastCooldownReprobeAt < combo.cooldownReprobe.intervalMs) return;
-  const usable = combo.targets.filter(target => targetProviderIsUsable(config, target, now)
-    && (eligible?.(target) ?? true));
+  const reprobeEligible = (target: NormalizedComboTarget): boolean => {
+    if (!targetProviderIsUsable(config, target, now)) return false;
+    try { return eligible?.(target) ?? true; } catch { return false; }
+  };
+  // Ordinary selection skips cooled targets without evaluating their request predicate.
+  // Preserve that behavior when a sibling is already available.
+  if (combo.targets.some(target => !isComboTargetInCooldown(comboId, target, now)
+    && reprobeEligible(target))) return;
+  const usable = combo.targets.filter(reprobeEligible);
   if (usable.length === 0 || !usable.every(target => isComboTargetInCooldown(comboId, target, now))) return;
   // No await between reservation and reset: concurrent requests cannot reserve another pass.
   const next = state ?? { successes: 0, currentWeights: new Map<string, number>(), successfulUses: new Map<string, number>() };

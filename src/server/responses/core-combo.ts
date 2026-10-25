@@ -509,12 +509,14 @@ export async function executeComboResponses(
   const payloadEligible = (target: (typeof combo.targets)[number]): boolean =>
     comboPayloadReadable || !unreadableEncryptedAgentTask || canDecryptUnreadableAgentTask(target);
   const meteredAllowed = admissionMayUseMeteredComboTargets(config, options.admission, combo);
-  const targetEligible = (target: (typeof combo.targets)[number]): boolean =>
+  // Recovery can replace unreadable encrypted input, but cannot relax other admission checks.
+  const recoveryEligible = (target: (typeof combo.targets)[number]): boolean =>
     (meteredAllowed || !target.metered)
     && (combo.strategy !== "jev" || target.provider !== JEV_PROVIDER_ID)
-    && payloadEligible(target)
     && reasoningReplayEligible(target)
     && (protocolLanes?.pickable(target) ?? true);
+  const targetEligible = (target: (typeof combo.targets)[number]): boolean =>
+    payloadEligible(target) && recoveryEligible(target);
   const onlyReplayIncompatibleTargetsRemain = (excluded: Iterable<string> = []): boolean => {
     const excludedKeys = new Set(excluded);
     const remaining = combo.targets.filter(target => {
@@ -614,7 +616,7 @@ export async function executeComboResponses(
     : jevSessionPinScope({ combo, comboId, admission: options.admission, lane: sessionLaneIdFromRequest(req.headers) });
 
   if (unreadableEncryptedAgentTask && !pick) {
-    pick = await pickWithWait({ now: initialNow });
+    pick = await pickWithWait({ eligible: recoveryEligible, now: initialNow });
     if (!pick) {
       discardEncryptedAgentTaskRecovery(
         req,
@@ -625,7 +627,7 @@ export async function executeComboResponses(
       return options.abortSignal?.aborted
         ? clientCancelledResponse()
         : comboUnavailable(comboId, undefined,
-          comboExclusionReasons(config, comboId, target => meteredAllowed || !target.metered));
+          comboExclusionReasons(config, comboId, recoveryEligible));
     }
     if (!(await recoverUnreadableEncryptedTask())) {
       return options.abortSignal?.aborted
@@ -1275,6 +1277,7 @@ export async function executeComboResponses(
         const recoveredTarget = await pickWithWait({
           exclude: pick.attempted,
           eligible: target => {
+            if (!recoveryEligible(target)) return false;
             try {
               const route = routeConcreteModel(config, `${target.provider}/${target.model}`);
               return route.codexAccountMode === undefined
@@ -1409,6 +1412,7 @@ export async function executeComboResponses(
       if (unreadableEncryptedAgentTask && !comboPayloadReadable) {
         const recoveredTarget = await pickWithWait({
           exclude: attemptedTargets,
+          eligible: recoveryEligible,
           now: failureNow,
         });
         if (recoveredTarget && await recoverUnreadableEncryptedTask()) {
